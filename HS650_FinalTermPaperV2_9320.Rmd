@@ -1,0 +1,918 @@
+---
+title: 'HS650 Final Term Paper'
+subtitle: 'Fall 2024, DSPA (HS650)'
+author: 'Name: Hafizh Yusuf, SID: 9320, UMich Email: Hafizhry@umich.edu'
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: spacelab
+    highlight: tango
+    toc: yes
+    number_sections: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+    code_folding: show
+    self_contained: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+tags:
+- DSPA
+- SOCR
+- MIDAS
+- Big Data
+- Predictive Analytics
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+I certify that the following paper represents my own independent work and conforms with the guidelines of academic honesty described in the UMich student handbook. 
+
+Hereby I disclose that I used online LLM resources (ChatGPT and UM Maizey GPT for HS650) to help debug codes, generate ideas, understand concepts, and improve the quality of the paper.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(plotly)
+library(tidyr)
+library(kableExtra)
+library(rvest)
+library(Hmisc)
+library(mi)
+library(DT)
+library(mice)
+library(factoextra)
+library(moments)
+library(tm)
+library(wordcloud)
+library(e1071)
+library(MASS)  
+library(C50)  
+library(rpart)
+library(caret)
+library(gmodels)
+library(GGally)
+library(matrixStats)
+library(cluster)
+library(Rtsne)
+library(umap)
+library(openai)
+library(config)
+remotes::install_github("rasyidstat/nusantr") # For Indonesian stopwords
+```
+
+# Abstract
+
+Telemedicine platforms have transformed healthcare delivery, generating vast amounts of free-text data from patient-physician interactions. This project leveraged 497,975 conversations from an Indonesian telemedicine platform to improve care efficiency through several strategies: simplifying pregnancy-related answers, prioritizing HIV-related consultations, and generating synthetic conversations. Pregnancy-related consultations were segmented into three themes, "Pregnancy Progression and Maternal Health," "Early Pregnancy Signs and Hormonal Concerns," and "Fertility, Conception, and Sexual Health" aim to streamline support for expectant mothers. HIV-related consultations were clustered into six themes, enabling the development of a predictive triage model with 95.72% accuracy to prioritize high-risk cases. Additionally, synthetic conversations in Indonesian and English were generated using OpenAI’s GPT-4o-mini API to create a contextual dataset for training language models, enhancing their relevance and accuracy. These findings demonstrate the potential of combining clustering, predictive modeling, and natural language generation to optimize telemedicine services and support efficient healthcare delivery.
+
+# Introduction
+
+Online Health Consultation (OHC), also referred to as telemedicine, has improved healthcare delivery by enabling seamless communication between patients and physicians. As a result, it has generated an immense volume of free-text data, capturing the essence of patient and physician conversations. Based on these large amount of conversation data, this project aims to explore ways to improve telemedicine care, making healthcare delivery more efficient.
+
+This project utilizes a dataset of 497,975 patient-physician conversations from an Indonesian OHC platform, spanning from December 8, 2014, to February 28, 2021. This dataset, publicly available on [Mendeley Data](https://data.mendeley.com/datasets/p8d5bynh3m/1), provides  for exploring various dimensions of care management. 
+ 
+## Dataset Overview
+
+```{r, import-data, warning=FALSE}
+# Load the CSV file
+set.seed(213) # Set seed for reproducibility
+df_notes_all <- read.csv("~/Documents/UMich/Health Informatics/2024 Fall/HS650/final-project/datasets/indo-health-conv/Indo-Online Health Consultation-Multilabel-Raw.csv")
+df_notes_all <- df_notes_all[!duplicated(df_notes_all),] # Remove duplicate
+df_notes <- df_notes_all
+
+# View data
+datatable(head(df_notes, 1))
+
+# Investigate dataset distribution
+summary(df_notes)
+```
+
+The dataset comprises of 360,530 unique rows and 10 columns, including 'question', 'answer', 'topics', 'risk', 'question_date', 'answer_date', 'topic_set'. The 'risk' column contains the risk level of the consultation, while 'topics' and 'topic_set' contain the topics discussed in the conversation. The 'question_date' and 'answer_date' columns represent the date of the question and answer, respectively.
+
+## Dataset EDA
+
+The goal of this exploratory data analysis (EDA) is to understand the dataset's characteristics, identify patterns, and explore potential insights. The analysis includes checking for missing values, examining the distribution of risk levels, and visualizing the length of questions and answers. Upon this EDA results, we will determine what hypotheses to test and the methods to use to address them with ultimate aim on improving telemedicine consultation services.
+
+```{r, eda-1, warning=FALSE}
+# Check for missing values
+missing_values <- df_notes %>%
+  summarise_all(~sum(is.na(.)))
+
+missing_values
+```
+
+There are no missing values in the dataset, ensuring that all columns are complete and ready for analysis.
+
+```{r, eda-2, warning=FALSE}
+# Pie chart of 'risk' distribution
+risk_distribution <- df_notes %>%
+  group_by(risk) %>%
+  summarise(count = n()) %>%
+  mutate(
+    proportion = count / sum(count),
+    label = paste0(risk, "\n", round(proportion * 100, 1), "% (", count, ")")
+  )
+
+ggplot(risk_distribution, aes(x = "", y = count, fill = risk)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  geom_text(aes(label = label), position = position_stack(vjust = 0.5)) +
+  labs(
+    title = "Distribution of Risk Levels",
+    x = NULL,
+    y = NULL,
+    fill = "Risk Level"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    panel.grid = element_blank()
+  )
+```
+
+Most of the dataset consists of low-risk consultations. This distribution is essential for understanding the volume of consultations and the potential impact of different risk levels on the platform.
+
+```{r, eda-3, warning=FALSE}
+# Histogram of question length  with outlier removed
+df_notes$question_length <- nchar(df_notes$question)
+
+question_mean_length <- mean(df_notes$question_length, na.rm = TRUE)
+question_sd_length <- sd(df_notes$question_length, na.rm = TRUE)
+
+df_notes_question_filtered <- df_notes %>%
+  filter(question_length >= (question_mean_length - 3 * question_sd_length) & question_length <= (question_mean_length + 3 * question_sd_length)) # Remove outliers
+
+ggplot(df_notes_question_filtered, aes(x = question_length)) + 
+  geom_histogram(binwidth = 100, fill = "skyblue", color = "black") +
+  labs(
+    title = "Histogram of Question Length (Outliers Removed)", 
+    x = "Answer Length", 
+    y = "Frequency"
+  ) +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_vline(aes(xintercept = mean(question_length, na.rm = TRUE)), color = "red", linetype = "dashed", linewidth = 1) # Add average line
+```
+
+The question given by patients has a wide range of lengths, with average falling between 300 to 500 characters (excluding the outliers). This gave us insight on the complexity of the questions and the amount of information patients giving out to the physician upon consultation.
+
+```{r, eda-4, warning=FALSE}
+# Histogram of answer length with outlier removed
+df_notes$answer_length <- nchar(df_notes$answer)
+answer_mean_length <- mean(df_notes$answer_length, na.rm = TRUE)
+answer_sd_length <- sd(df_notes$answer_length, na.rm = TRUE)
+
+df_notes_answer_filtered <- df_notes %>%
+  filter(answer_length >= (answer_mean_length - 3 * answer_sd_length) & answer_length <= (answer_mean_length + 3 * answer_sd_length)) # Remove outliers
+
+ggplot(df_notes_answer_filtered, aes(x = answer_length)) + 
+  geom_histogram(binwidth = 100, fill = "skyblue", color = "black") +
+  labs(
+    title = "Histogram of Answer Length (Outliers Removed)", 
+    x = "Answer Length", 
+    y = "Frequency"
+  ) +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_vline(aes(xintercept = mean(answer_length, na.rm = TRUE)), color = "red", linetype = "dashed", linewidth = 1)
+```
+
+Meanwhile, the answer given by physician has average around 1500 characters signifying that the physician is giving detailed information to the patient with the limited information given by the patient.
+
+```{r, eda-5, warning=FALSE}
+# Number of distinct 'topic_set' values in 'low risk'
+distinct_low_risk_topics_count <- df_notes %>%
+  group_by(topic_set) %>%     
+  filter(risk == "low") %>% 
+  summarise(num_of_answer = n(), distinct_topics = n_distinct(topics)) %>% 
+  arrange(desc(num_of_answer))
+
+datatable(head(distinct_low_risk_topics_count), caption = "Low-Risk Topics and Their Distribution")
+```
+
+The table above shows topic sets from the low-risk category, such as kehamilan (pregnancy), which has 12,865 answers and 456 distinct topics. With so many different topics in one set, it becomes hard to identify the main themes of the conversations. Grouping these topics into broader categories can help simplify the analysis and make it easier to understand the general themes.
+
+```{r, eda-6, warning=FALSE}
+# Number of distinct 'topic_set' values in 'high risk'
+distinct_high_risk_topics_count <- df_notes %>%
+  group_by(topic_set) %>%     
+  filter(risk == "high") %>% 
+  summarise(num_of_answer = n(), distinct_topics = n_distinct(topics)) %>% 
+  arrange(desc(num_of_answer))
+
+datatable(head(distinct_high_risk_topics_count), caption = "High-Risk Topics and Their Distribution")
+```
+
+Similar to the low-risk categories previously, the table shows topic sets from higher-risk categories such as tuberkulosis (tuberculosis) with 3,933 answers and 501 distinct topics. These topic sets also contain a large number of distinct topics, making it difficult to identify the main themes of the conversations. Simplifying these topic sets by grouping them into broader categories would make it easier to analyze and prioritize care strategies.
+
+```{r, eda-7, warning=FALSE}
+# Get top 5 most frequent 'topic_set' for each 'risk' levels
+top_5_topic_set_high_risk <- distinct_high_risk_topics_count %>% slice_head(n = 5)
+top_5_topic_set_low_risk <- distinct_low_risk_topics_count %>% slice_head(n = 5)
+
+# Date data parsing
+df_notes$parsed_date <- as.Date(df_notes$question_date, format = "%d %B %Y, %H:%M")
+df_notes$month_year <- as.Date(format(df_notes$parsed_date, "%Y-%m-01"), format = "%Y-%m-%d")
+
+# Month-Year trend of consultation per 'risk'
+monthly_risk_trend <- df_notes %>%
+  group_by(month_year, risk) %>%
+  summarise(consultation_count = n(), .groups = "drop") %>%
+  arrange(desc(consultation_count), as.Date(month_year, format = "%Y-%m"), risk)
+
+ggplot(monthly_risk_trend, aes(x = as.Date(month_year, format = "%Y-%m"), y = consultation_count, color = risk, group = risk)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Monthly Trend of Consultations per Risk Level",
+    x = "Month-Year",
+    y = "Number of Consultations",
+    color = "Risk Level"
+  ) +
+  theme_minimal()
+```
+
+The monthly trend of consultations divided by risk level shown above. Low-risk consultations dominate, peaking significantly around 2018, followed by a gradual decline. In contrast, high-risk consultations maintain a steady but relatively low level throughout the period. This indicates a higher volume of low-risk cases being addressed on the platform, emphasizing the need for scalable solutions for low-risk categories while ensuring focused care for high-risk cases.
+
+```{r, eda-8, warning=FALSE}
+# Month-Year trend of top 5 'topic_set' in 'low risk' consultations
+monthly_top_5_topic_set_low_risk <- df_notes %>%
+  filter(topic_set %in% top_5_topic_set_low_risk$topic_set) %>%
+  group_by(month_year, topic_set) %>%
+  summarise(consultation_count = n(), .groups = "drop") %>%
+  arrange(as.Date(month_year, format = "%Y-%m"), topic_set)
+
+ggplot(monthly_top_5_topic_set_low_risk, aes(x = as.Date(month_year, format = "%Y-%m"), y = consultation_count, color = topic_set, group = topic_set)) +
+  geom_line() +
+  labs(
+    title = "Monthly Trend of Top 5 Topic Sets in Low Risk Consultations",
+    x = "Month - Year",
+    y = "Number of Consultations",
+    color = "Topic Set"
+  ) +
+  theme_minimal()
+```
+
+The linechart above shows monthly trends for low-risk topics like kehamilan (pregnancy), bayi (infants), intim-wanita (women's intimacy), menstruasi (menstruation), and obat (medications). Pregnancy had the highest activity followed by menstruation, peaking in 2018, while other topics show steady but lower engagement over time.
+
+```{r, eda-9, warning=FALSE}
+# Month-Year trend of top 5 'topic_set' in 'high risk' consultations
+monthly_top_5_topic_set_high_risk <- df_notes %>%
+  filter(topic_set %in% top_5_topic_set_high_risk$topic_set) %>%
+  group_by(month_year, topic_set) %>%
+  summarise(consultation_count = n(), .groups = "drop") %>%
+  arrange(as.Date(month_year, format = "%Y-%m"), topic_set)
+
+ggplot(monthly_top_5_topic_set_high_risk, aes(x = as.Date(month_year, format = "%Y-%m"), y = consultation_count, color = topic_set, group = topic_set)) + 
+  geom_line() +
+  labs(
+    title = "Monthly Trend of Top 5 Topic Sets in High Risk Consultations",
+    x = "Month - Year",
+    y = "Number of Consultations",
+    color = "Topic Set"
+  ) +
+  theme_minimal()
+```
+
+Next, the monthly trends for high-risk topics like tuberculosis, HIV, diarhea, diabetes, and stroke. Tuberculosis saw the highest activity, peaking in 2018 before declining, while other topics had steady but lower activity. Diabetes and stroke have relatively lower numbers of consultations, indicating less frequent but ongoing discussions.
+
+# Hypotheses & Methods
+
+After examining the content of these conversations, this project will focus on three different hypotheses that ultimately aim to improve telemedicine consultation services. The methods used to address these hypotheses include clustering analysis, predictive analysis, and synthetic data generation using OpenAI's GPT-4o-mini API. Detailed explanations of each problem and the methods used are provided below:
+	
+1.	*Simplifying Pregnancy-Related Answers*: 
+
+Problem: Pregnancy-related consultations contain a wide range of topics, making it challenging to identify the general themes that has the potential of improving care efficiency.
+
+Hypothesis: Group diverse pregnancy-related queries into general categories to streamline information and improve support for expectant mothers. 
+  
+Method: Clustering analysis using k-means with TF-IDF vectorization to segment the pregnancy topic set and then visualize it using t-SNE.
+	
+2.	*Triage Prioritization for HIV-Related Questions*: 
+
+Problem: High-risk consultations, such as HIV-related questions, require immediate attention and prioritization to ensure timely and effective care. However, the current system does not have a mechanism to prioritize these cases.
+
+Hypothesis: Segment HIV-related questions into priority levels (High, Medium, and Low) to enhance response times and ensure that urgent cases receive the attention they need. 
+  
+Method: A two-step approach:
+	
+•	Clustering analysis: Segment the ‘hiv’ topic set based on question characteristics utilizing k-means clustering with TF-IDF vectorization and then visualize it using UMAP.
+	
+•	Predictive analysis: Predict triage priorities by creating model utilizing LDAs and SMOTE to balance the dataset and then evaluate the model using confusion matrix and ROC curve.
+
+
+3.	*Conversation Generator*: 
+
+Problem: With the increasing usage of LLM, Indonesian specific conversational data is needed to train the LLM model to be relevant to the Indonesian context. However, there is a lack of Indonesian conversational data that can be used to train the model.
+
+Hypothesis: Create a synthetic conversation utilizing LLM (OpenAI's GPT-4o-mini API) to simulate patient-physician interactions aims to create question answering dataset in Indonesian language. 
+  
+Method: Utilize OpenAI's GPT-4o-mini API to generate synthetic conversations based on patient questions and physician answers from the dataset.
+
+# Results
+
+## Simplifying Pregnancy-Related Answers
+
+```{r, kehamilan-analysis-1, warning=FALSE}
+# Select conversation related to 'kehamilan' 'topic_set'
+df_kehamilan <- df_notes %>%
+  filter(topic_set == "kehamilan") %>% 
+  dplyr::select(answer, topics, risk) %>%
+  distinct(answer, .keep_all = TRUE)  
+
+# Add Indonesian stopwords
+id_stopwords <- nusantr::kata_setop
+id_stopwords_vector <- id_stopwords$word
+
+# Perform text cleaning
+clean_text <- function(text, stopwords) {
+  text <- tolower(text)                       # Convert to lowercase
+  text <- removeNumbers(text)                 # Remove numbers
+  text <- removeWords(text, id_stopwords_vector) # Remove stopwords in Indonesian
+  text <- gsub("[[:punct:]]", " ", text)      # Replace punctuation with spaces
+  text <- stripWhitespace(text)               # Remove extra whitespaces
+  return(text)
+}
+
+# Apply the cleaning function to the 'answer' column
+df_kehamilan$cleaned_answer <- sapply(df_kehamilan$answer, clean_text, stopwords = id_stopwords)
+# datatable(head(df_kehamilan))
+```
+
+The dataset is filtered to include only pregnancy-related consultations, and the answers are cleaned to remove numbers, punctuation, and stopwords in Indonesian.
+
+```{r, kehamilan-analysis-2, warning=FALSE}
+# data processing to corpus
+notes_corpus <- Corpus(VectorSource(df_kehamilan$cleaned_answer))
+
+# Perform corpus preprocessing and remove conjunctions
+notes_corpus_clean <- notes_corpus %>%
+  tm_map(content_transformer(tolower)) %>%                 # Convert to lowercase
+  tm_map(removeNumbers) %>%                                # Remove numbers
+  tm_map(removeWords, id_stopwords_vector) %>%             # Remove stopwords in Indonesian
+  tm_map(stripWhitespace)                                  # Remove extra whitespaces
+
+# Create DocumentTermMatrix corpus 
+notes_dtm <- DocumentTermMatrix(notes_corpus_clean, control = list(weighting=weightTfIdf))
+notes_dtm <- removeSparseTerms(notes_dtm, 0.95) # Remove sparse terms
+notes_matrix <- as.matrix(notes_dtm)
+```
+
+
+
+```{r, kehamilan-analysis-3, warning=FALSE}
+# Function to tune hyperparameter K
+kpp_init = function(dat, K) {
+  x = as.matrix(dat)
+  n = nrow(x)
+  # Randomly choose a first center
+  centers = matrix(NA, nrow=K, ncol=ncol(x))
+  # set.seed(123)
+  centers[1,] = as.matrix(x[sample(1:n, 1),])
+  for (k in 2:K) {
+    # Calculate dist^2 to closest center for each point
+    dists = matrix(NA, nrow=n, ncol=k-1)
+    for (j in 1:(k-1)) {
+      temp = sweep(x, 2, centers[j,], '-')
+      dists[,j] = rowSums(temp^2)
+    }
+    dists = rowMins(dists)
+    # Draw next center with probability proportional to dist^2
+    cumdists = cumsum(dists)
+    prop = runif(1, min=0, max=cumdists[n])
+    centers[k,] = as.matrix(x[min(which(cumdists > prop)),])
+  }
+  return(centers)
+}
+
+dis <- dist(notes_matrix, method = "euclidean")
+n_rows <- 10
+
+mat = matrix(0,nrow = n_rows)
+for (i in 2:n_rows){
+  set.seed(321)
+  clust_kpp = kmeans(notes_matrix, kpp_init(notes_matrix, i), iter.max=100, algorithm='Lloyd')
+  sil = silhouette(clust_kpp$cluster, dis)
+  mat[i] = mean(as.matrix(sil)[,3])
+}
+colnames(mat) <- c("Avg_Silhouette_Value")
+
+df <- data.frame(k=2:n_rows,sil=mat[2:n_rows])
+plot_ly(df, x = ~k, y = ~sil, type = 'scatter', mode = 'lines+markers', name = 'Silhouette') %>%
+  layout(
+    title = "Average Silhouette Graph",
+    xaxis = list(title = "Number of Clusters (k)"),
+    yaxis = list(title = "Average Silhouette Value")
+  )
+```
+
+Using the Elbow Method, the optimal number of clusters for the k-means algorithm is determined to be 3 based on the decline pattern of average silhouette value. This will be used to segment the pregnancy-related consultations into three distinct clusters.
+
+```{r, kehamilan-analysis-4, warning=FALSE}
+# Set the number of clusters
+set.seed(123)
+num_clusters <- 3 
+
+# Apply k-means clustering
+kmeans_result <- kmeans(notes_matrix, centers = num_clusters)
+
+# Add cluster assignment back to the original data
+df_kehamilan$cluster <- kmeans_result$cluster
+
+# Add top-10 words from the cluster
+dtm_df <- as.data.frame(as.matrix(notes_dtm))
+dtm_df$cluster <- df_kehamilan$cluster
+
+top_words_by_cluster <- dtm_df %>%
+  group_by(cluster) %>%
+  summarise(across(everything(), sum, .names = "sum_{col}")) %>%
+  pivot_longer(cols = starts_with("sum_"), names_to = "word", values_to = "frequency") %>%
+  mutate(word = sub("sum_", "", word)) %>%
+  arrange(cluster, desc(frequency)) %>%
+  group_by(cluster) %>%
+  slice_max(order_by = frequency, n = 10) %>%
+  ungroup()
+
+# Add the top-10 words back to the cluster data
+top_words_by_cluster_summary <- top_words_by_cluster %>%
+  group_by(cluster) %>%
+  summarise(top_words = paste(word, collapse = ", "))
+
+df_kehamilan <- df_kehamilan %>%
+  left_join(top_words_by_cluster_summary, by = "cluster")
+
+# Add cluster names 
+cluster_names <- c(
+  "1" = "Pregnancy Progression and Maternal Health",
+  "2" = "Early Pregnancy Signs and Hormonal Concerns",
+  "3" = "Fertility, Conception, and Sexual Health"
+)
+
+top_words_by_cluster_summary <- top_words_by_cluster_summary %>%
+  mutate(cluster_name = cluster_names[as.character(cluster)])
+
+# View the updated data
+datatable(top_words_by_cluster_summary, caption = "Top Words by Cluster")
+```
+
+After classfying the pregnancy-related consultations into three clusters, the top words for each cluster are identified. The top words then used to assign a name to each cluster based on the common themes found in the conversations.
+The first cluster have words such as "hamil" (pregnant), "bulan" (month), and "janin" (fetus), indicating discussions about pregnancy progression and maternal health. The second cluster includes words like "haid" (menstruation), "sakit" (pain), and "darah" (blood), suggesting early pregnancy signs and hormonal concerns. The third cluster contains words such as "sperma" (sperm), "ovulasi" (ovulation), and "kondom" (condom), indicating discussions about fertility, conception, and sexual health. Moving forward, the cluster name will represent the themes of each cluster.
+
+```{r, kehamilan-analysis-5, warning=FALSE}
+# Perform t-SNE (reduce dimensions to 2)
+unique_notes_matrix <- unique(notes_matrix) # Remove duplicate rows from matrix
+duplicated_rows <- duplicated(notes_matrix) 
+duplicate_indices <- which(duplicated_rows) 
+df_kehamilan_cleaned <- df_kehamilan[-duplicate_indices, ] # Remove duplicate rows from df_kehamilan
+
+tsne_result <- Rtsne(unique_notes_matrix, dims = 2, perplexity = 30, verbose = TRUE, max_iter = 500)
+
+# Create a t-SNE result dataframe
+df_tsne <- as.data.frame(tsne_result$Y)
+colnames(df_tsne) <- c("Dim1", "Dim2")
+df_tsne$cluster <- as.factor(df_kehamilan_cleaned$cluster)
+```
+
+The t-SNE visualization of the pregnancy-related consultations is shown below. The clusters are represented by different colors, and the top words from each cluster are used as labels to identify the main themes of the conversations.
+
+```{r, kehamilan-analysis-6, warning=FALSE}
+# Merge `top_words_by_cluster_summary` with `df_tsne`
+df_tsne$cluster <- as.integer(as.character(df_tsne$cluster)) 
+top_words_by_cluster_summary$cluster <- as.integer(top_words_by_cluster_summary$cluster) 
+
+df_tsne <- df_tsne %>%
+  left_join(top_words_by_cluster_summary, by = c("cluster" = "cluster"))
+
+# Plot t-SNE results with top_words as labels
+plot_ly(
+  data = df_tsne,
+  x = ~Dim1,
+  y = ~Dim2,
+  color = ~cluster_name,
+  type = 'scatter',
+  mode = 'markers',
+  marker = list(opacity = 0.6)
+) %>%
+  layout(
+    title = "t-SNE Visualization of Pregnancy Consultation Clusters",
+    xaxis = list(title = "Dimension 1"),
+    yaxis = list(title = "Dimension 2"),
+    legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.2)
+  )
+
+```
+
+As seen in the t-SNE visualization, the pregnancy-related consultations are segmented into three distinct clusters based on the main themes of the conversations. The clusters are represented by different colors, and the top words from each cluster are used as labels to identify the main themes of the conversations. The pattern of the clusters indicates that the segmentation was successful as each of the cluster themes are clearly separated. 
+
+The overarching theme on pregnancy consultation is "Pregnancy Progression and Maternal Health" (purple) as it is the most common theme among the consultations. The other two themes are "Early Pregnancy Signs and Hormonal Concerns" (green) and "Fertility, Conception, and Sexual Health" (orange) are well seperated compared to the purple, indicating the answer given by the physician are well categorized. Overall, we managed to simplify the pregnancy-related consultations into three distinct clusters, making it easier to identify the main themes of the conversations.
+
+## Triage Prioritization for HIV-Related Questions
+
+### Cluster Analysis
+
+```{r, hiv-analysis-1, warning=FALSE}
+# Select conversation related to 'hiv' 'topic_set'
+df_hiv <- df_notes %>%
+  filter(topic_set == "hiv") %>% 
+  dplyr::select(question, topics, risk) %>%
+  distinct(question, .keep_all = TRUE)  
+
+# Add Indonesian stopwords
+id_stopwords <- nusantr::kata_setop
+id_stopwords_vector <- id_stopwords$word
+
+# Perform text cleaning
+clean_text <- function(text, stopwords) {
+  text <- tolower(text)                       # Convert to lowercase
+  text <- removeNumbers(text)                 # Remove numbers
+  text <- removeWords(text, id_stopwords_vector) # Remove stopwords in Indonesian
+  text <- gsub("[[:punct:]]", " ", text)      # Replace punctuation with spaces
+  text <- stripWhitespace(text)               # Remove extra whitespaces
+  return(text)
+}
+
+# Apply the cleaning function to the 'question' column
+df_hiv$cleaned_question <- sapply(df_hiv$question, clean_text, stopwords = id_stopwords)
+# datatable(head(df_hiv))
+```
+
+Siumilar to the previous section, the dataset is filtered to include only HIV-related consultations, and the questions are cleaned to remove numbers, punctuation, and stopwords in Indonesian.
+
+```{r, hiv-analysis-2, warning=FALSE}
+# data processing to corpus
+notes_corpus <- Corpus(VectorSource(df_hiv$cleaned_question))
+
+# Perform corpus preprocessing and remove conjunctions
+notes_corpus_clean <- notes_corpus %>%
+  tm_map(content_transformer(tolower)) %>%                 # Convert to lowercase
+  tm_map(removeNumbers) %>%                                # Remove numbers
+  tm_map(removeWords, id_stopwords_vector) %>%             # Remove stopwords in Indonesian
+  tm_map(stripWhitespace)                                  # Remove extra whitespaces
+
+# Create DocumentTermMatrix corpus 
+notes_dtm <- DocumentTermMatrix(notes_corpus_clean, control = list(weighting=weightTfIdf))
+notes_dtm <- removeSparseTerms(notes_dtm, 0.95)
+notes_matrix <- as.matrix(notes_dtm)
+```
+
+
+
+```{r, hiv-analysis-3, warning=FALSE}
+# Function to tune hyperparameter K
+kpp_init = function(dat, K) {
+  x = as.matrix(dat)
+  n = nrow(x)
+  # Randomly choose a first center
+  centers = matrix(NA, nrow=K, ncol=ncol(x))
+  # set.seed(123)
+  centers[1,] = as.matrix(x[sample(1:n, 1),])
+  for (k in 2:K) {
+    # Calculate dist^2 to closest center for each point
+    dists = matrix(NA, nrow=n, ncol=k-1)
+    for (j in 1:(k-1)) {
+      temp = sweep(x, 2, centers[j,], '-')
+      dists[,j] = rowSums(temp^2)
+    }
+    dists = rowMins(dists)
+    # Draw next center with probability proportional to dist^2
+    cumdists = cumsum(dists)
+    prop = runif(1, min=0, max=cumdists[n])
+    centers[k,] = as.matrix(x[min(which(cumdists > prop)),])
+  }
+  return(centers)
+}
+
+dis <- dist(notes_matrix, method = "euclidean")
+n_rows <- 10
+
+mat = matrix(0,nrow = n_rows)
+for (i in 2:n_rows){
+  set.seed(321)
+  clust_kpp = kmeans(notes_matrix, kpp_init(notes_matrix, i), iter.max=100, algorithm='Lloyd')
+  sil = silhouette(clust_kpp$cluster, dis)
+  mat[i] = mean(as.matrix(sil)[,3])
+}
+colnames(mat) <- c("Avg_Silhouette_Value")
+
+df <- data.frame(k=2:n_rows,sil=mat[2:n_rows])
+plot_ly(df, x = ~k, y = ~sil, type = 'scatter', mode = 'lines+markers', name = 'Silhouette') %>%
+  layout(
+    title = "Average Silhouette Graph",
+    xaxis = list(title = "Number of Clusters (k)"),
+    yaxis = list(title = "Average Silhouette Value")
+  )
+```
+
+Utilizing the same Elbow Method, the optimal number of clusters for the k-means algorithm is determined to be 6 based on the decline pattern of average silhouette value. This will be used to segment the HIV-related consultations into six distinct clusters.
+
+```{r, hiv-analysis-4, warning=FALSE}
+# Set the number of clusters
+set.seed(123)
+num_clusters <- 6 
+
+# Apply k-means clustering
+kmeans_result <- kmeans(notes_matrix, centers = num_clusters)
+
+# Add cluster assignment back to the original data
+df_hiv$cluster <- kmeans_result$cluster
+
+# Add top-10 words from the cluster
+dtm_df <- as.data.frame(as.matrix(notes_dtm))
+dtm_df$cluster <- df_hiv$cluster
+
+top_words_by_cluster <- dtm_df %>%
+  group_by(cluster) %>%
+  summarise(across(everything(), sum, .names = "sum_{col}")) %>%
+  pivot_longer(cols = starts_with("sum_"), names_to = "word", values_to = "frequency") %>%
+  mutate(word = sub("sum_", "", word)) %>%
+  arrange(cluster, desc(frequency)) %>%
+  group_by(cluster) %>%
+  slice_max(order_by = frequency, n = 10) %>%
+  ungroup()
+
+# # View the top-10 words for each cluster
+# print(top_words_by_cluster)
+
+# Add the top-10 words back to the cluster data
+top_words_by_cluster_summary <- top_words_by_cluster %>%
+  group_by(cluster) %>%
+  summarise(top_words = paste(word, collapse = ", "))
+
+# Add cluster names
+cluster_names <- c(
+  "1" = "Sexual Relationships and Protection",
+  "2" = "Unprotected Sexual Activity Risks",
+  "3" = "Testing and Diagnosis",
+  "4" = "HIV/AIDS Awareness and Symptoms",
+  "5" = "Potential Exposure to Viruses",
+  "6" = "Treatment and Recovery Support"
+)
+
+triage_priorities <- c(
+  "1" = "Low",
+  "2" = "High",
+  "3" = "Medium",
+  "4" = "High",
+  "5" = "Medium",
+  "6" = "High"
+)
+
+# Add cluster names and triage priorities to the data
+top_words_by_cluster_summary <- top_words_by_cluster_summary %>%
+  mutate(
+    cluster_name = cluster_names[as.character(cluster)],
+    triage_priority = triage_priorities[as.character(cluster)]
+  )
+
+df_hiv <- df_hiv %>%
+  left_join(top_words_by_cluster_summary, by = "cluster")
+
+# View the updated data
+datatable(top_words_by_cluster_summary, caption = "Top Words by Cluster")
+```
+
+After classfying the HIV-related consultations into six clusters, the top words for each cluster are identified. The top words then used to assign a name to each cluster based on the common themes found in the conversations. The first cluster have words such as "intim" (intimacy), "pengaman" (safety), and "pasangan" (partner), indicating discussions about sexual relationships and protection. The second cluster includes words like "sex" (sex), "cairan" (liquid), and "berhubungan" (sex), suggesting discussions about unprotected sexual activity risks. The third cluster contains words such as "tes" (test), "gejala" (symptom), and "virus" (virus), indicating discussions about testing and diagnosis. The fourth cluster includes words like "aids" (AIDS), "terkena" (caught), and "tertular" (infected), suggesting discussions about HIV/AIDS awareness and symptoms. The fifth cluster contains words such as "virus" (virus), "darah" (blood), and "tertular" (infected), indicating discussions about potential exposure to viruses. The sixth cluster includes words like "obat" (medication), "positif" (positive), and "sembuh" (recovery), suggesting discussions about treatment and recovery support. Moving forward, the cluster name will represent the themes of each cluster, and the triage priority will indicate the urgency and severity of the topics discussed.
+
+In terms of triage priorities, the clusters are assigned into three categories: Low, Medium, and High based on the urgency and severity of the themes identified previously. The triage priorities will be used to prioritize the response times and ensure that urgent cases receive the attention they need. The first cluster is assigned a Low priority, the second fourth and sixth clusters are assigned a High priority, and lastly the third and fifth clusters are assigned a Medium priority.
+
+```{r, hiv-analysis-5, warning=FALSE}
+# Perform UMAP (reduce dimensions to 3)
+unique_notes_matrix <- unique(notes_matrix) # Remove duplicate rows from matrix
+duplicated_rows <- duplicated(notes_matrix) 
+duplicate_indices <- which(duplicated_rows) 
+df_hiv_cleaned <- df_hiv[-duplicate_indices, ] # Remove duplicate rows from df_hiv
+
+umap_result <- umap(unique_notes_matrix, n_neighbors = 30, n_components = 3, metric = "euclidean")
+
+# Create a UMAP result dataframe
+df_umap <- as.data.frame(umap_result$layout)
+colnames(df_umap) <- c("Dim1", "Dim2", "Dim3")
+df_umap$cluster <- as.factor(df_hiv_cleaned$cluster)
+
+# Merge `top_words_by_cluster_summary` with `df_umap`
+df_umap$cluster <- as.integer(as.character(df_umap$cluster)) 
+top_words_by_cluster_summary$cluster <- as.integer(top_words_by_cluster_summary$cluster) 
+
+df_umap <- df_umap %>%
+  left_join(top_words_by_cluster_summary, by = c("cluster" = "cluster"))
+```
+
+The UMAP visualization of the HIV-related consultations is shown below. The clusters are represented by different colors, and the top words from each cluster are used as labels to identify the main themes of the conversations.
+
+```{r, hiv-analysis-6, warning=FALSE}
+# Plot UMAP results with top_words as labels
+plot_ly(
+  data = df_umap,
+  x = ~Dim1,
+  y = ~Dim2,
+  z = ~Dim3,
+  color = ~cluster_name,
+  type = 'scatter3d',
+  mode = 'markers',
+  marker = list(opacity = 0.6)
+) %>%
+  layout(
+    title = "UMAP Visualization of Pregnancy Consultation Clusters",
+    xaxis = list(title = "Dimension 1"),
+    yaxis = list(title = "Dimension 2"),
+    zaxis = list(title = "Dimension 3"),
+    legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.2)
+  )
+```
+
+As seen in the UMAP visualization, the HIV-related consultations are segmented into six distinct clusters based on the main themes of the conversations. The clusters are represented by different colors, and the top words from each cluster are used as labels to identify the main themes of the conversations. The most prominent theme is "Testing and Diagnosis" (Pink) which occupy the central 3D space, indicating that the theme is the most common among the consultations and it might be the bridge to other themes. The other themes are "Sexual Relationships and Protection" (Purple), "Unprotected Sexual Activity Risks" (Yellow), "HIV/AIDS Awareness and Symptoms" (Green), "Potential Exposure to Viruses" (Orange), and "Treatment and Recovery Support" (Light Green) are well separated compared to the pink, indicating the answers are different from one to another. Overall, the clustering analysis successfully segmented the HIV-related consultations into distinct clusters, making it easier to identify the main themes of the conversations.
+
+```{r, hiv-analysis-7, warning=FALSE}
+# Visualize the 'triage_priority' distribution in the segmented dataset
+df_hiv$triage_priority <- factor(df_hiv$triage_priority, levels = c("Low", "Medium", "High"))
+
+ggplot(df_hiv, aes(x = triage_priority, fill = triage_priority)) +
+  geom_bar() +
+  labs(
+    title = "Distribution of Triage Priorities in HIV Consultations",
+    x = "Triage Priority",
+    y = "Number of Consultations",
+    fill = "Triage Priority"
+  ) +
+  theme_minimal()
+```
+
+Above is the distribution of triage priorities in the segmented HIV-related consultations. The majority of consultations are classified as Medium priority, followed by High and Low priorities. This distribution will be used to prioritize the response times and ensure that urgent cases receive the attention they need. This will help improve the efficiency of the telemedicine platform by ensuring that high-risk consultations are addressed promptly. 
+
+Using the clustering analysis, we will try to create model to predict the triage priorities of the HIV-related consultations. The model will utilize the question features and the triage priorities to predict the priority levels of the consultations.
+
+### Predictive Analysis
+
+```{r, hiv-analysis-8, warning=FALSE}
+# Translate variable to factor
+df_hiv$triage_priority <- factor(df_hiv$triage_priority, levels = c("Low", "Medium", "High"))
+
+# Use DocumentTermMatrix (notes_dtm) as features
+feature_df <- as.data.frame(as.matrix(notes_dtm))
+feature_df$triage_priority <- df_hiv$triage_priority
+
+# Separate features and target variable
+X_train <- feature_df[, -ncol(feature_df)]
+y_train <- feature_df$triage_priority
+
+# Use SMOTE to balance the dataset
+smote_result <- smotefamily::SMOTE(X = X_train, target = y_train, K = 2, dup_size = 0)
+feature_df_balanced <- smote_result$data
+feature_df_balanced$triage_priority <- factor(feature_df_balanced$class, 
+                                              levels = c("Low", "Medium", "High"))
+feature_df_balanced$class <- NULL
+
+# Plot distribution comparison before and after balancing
+before_counts <- as.data.frame(table(feature_df$triage_priority))
+after_counts <- as.data.frame(table(feature_df_balanced$triage_priority))
+colnames(before_counts) <- c("class", "freq_df_hiv")
+colnames(after_counts) <- c("class", "freq_df_hiv_balanced")
+count_comparison <- base::merge(before_counts, after_counts, by = "class", all = TRUE)
+
+plot_ly(count_comparison, x = ~class, y = ~freq_df_hiv, type = 'bar', name = 'Before SMOTE', 
+        marker = list(color = 'blue')) %>%
+  add_trace(y = ~freq_df_hiv_balanced, name = 'After SMOTE', marker = list(color = 'red')) %>%
+  layout(title = "Class Distribution Before and After SMOTE",
+         xaxis = list(title = "Class"),
+         yaxis = list(title = "Count"),
+         barmode = 'group')
+```
+
+Since the triage priority classes are imbalanced, we will use the SMOTE technique to balance the dataset. The bar chart above shows the distribution comparison of the triage priorities before and after balancing. The blue bars represent the original distribution, while the red bars represent the balanced distribution. The classes are now balanced, ensuring that the model will not be biased towards the majority class.
+
+```{r, hiv-analysis-9, warning=FALSE}
+# Create the training and testing partitions using the balanced dataset
+set.seed(123)
+train_index <- createDataPartition(feature_df_balanced$triage_priority, p = 0.8, list = FALSE)
+train_data <- feature_df_balanced[train_index, ]
+test_data <- feature_df_balanced[-train_index, ]
+
+# Fit LDA model on the balanced training set
+lda_model <- MASS::lda(triage_priority ~ ., data = train_data)
+
+# Make predictions on the test set
+lda_predictions <- predict(lda_model, newdata = test_data)
+
+# Evaluate predictions using a confusion matrix
+conf_mat <- confusionMatrix(lda_predictions$class, test_data$triage_priority)
+conf_mat
+```
+
+The Linear Discriminant Analysis (LDA) model is trained on the balanced training set and used to make predictions on the test set. After training the model by using 80% of the balanced dataset, the model is evaluated using the rest 20% of the dataset. Based on the confusion matrix, overall accuracy of the model is 95.72%, with a 95% confidence interval ranging from 93.59% to 97.3%. The model significantly outperforms random chance, as indicated by a p-value less than 2.2e-16. Furthermore the Kappa value of 0.93 indicates a high level of agreement between the predicted and actual triage priorities.
+
+As for per class performance, the model performs well across all triage priorities. The sensitivity and specificity values are high for all classes, indicating that the model can effectively predict the triage priorities of the HIV-related consultations. The model's performance is consistent across all classes, with sensitivity values ranging from 0.93 to 0.98 and specificity values ranging from 0.94 to 0.98, except for the sensitivity of the High class that is slightly lower at 0.70. Furthermore, the false negative rate throughout the classes are low, indicating that the model less likely to decrease the priority of the consultations.
+
+Overall, the predictive analysis successfully created a model to predict the triage priorities of the HIV-related consultations. The model demonstrates high accuracy, sensitivity, and specificity, indicating that it can effectively predict the question triage priority. This will help improve the efficiency of the telemedicine platform by ensuring that high-risk consultations are addressed promptly.
+
+
+## Conversation Generator
+
+```{r, gen-ai-1, warning=FALSE}
+# Set OpenAI API key
+api_key <- config::get("openai_api_key")
+Sys.setenv(OPENAI_API_KEY = api_key)
+# Sys.setenv(OPENAI_API_KEY = "") # or put GPT API key here
+
+
+# Function to generate conversation using OpenAI GPT API
+generate_conversation <- function(patient_question, doctor_answer, language) {
+  # Define the prompt for the conversation generation
+  prompt <- paste(
+    "I want you to role-play as a doctor and a patient.",
+    "The main goal of this role-play is to create a conversation between the doctor and the patient that feels as natural as possible.",
+    "Here is a question from the patient to the doctor as a precursor to the conversation:",
+    patient_question,
+    "Here is the doctor's response to the patient as a precursor to the conversation:",
+    doctor_answer,
+    "Create a conversation with 8 to 10 exchanges, adjusting for the complexity of the case.",
+    "Remove any name and other personally identifiable information from the conversation, make the generated converstion anonymous.",
+    "Make the conversation in:",
+    language, 
+    "DO NOT ADD OTHER INFORMATION THAT IS NOT ON THE PRECURSOR QUESTION AND ANSWER!",
+    "REMOVE ANY NAME AND OTHER PERSONALLY IDENTIFIABLE INFORMATION FROM THE CONVERSATION!"
+  )
+  
+  answer = create_chat_completion(
+    model = "gpt-4o-mini",
+    temperature = 0,
+    messages = list(
+      list(
+        "role" = "system",
+        "content" = "You are a professional doctor simulating a conversation with a patient."
+      ),
+      list(
+        "role" = "user",
+        "content" = prompt
+      )
+    )
+  )
+
+  conversation = answer$choices$message.content
+  
+  return(conversation)
+}
+```
+
+The function `generate_conversation` is created to generate synthetic conversations using OpenAI's GPT-4o-mini API. In order for the generated conversation to be as contextual, prompt engineering is done The prompt used in this function clearly specifies the role-play scenario, the patient's question, the doctor's answer, and the language of the conversation. The function includes a patient's question and a doctor's answer as input and generates a conversation between the patient and the doctor. The function also takes parameter on what language the conversation will be generated, in this case we will generate the conversation in Indonesian and English. As the dataset contains several names whether it is the patient or doctor name, we specify in the prompt to remove any name and other personally identifiable information from the conversation. This is to ensure that the generated conversation is anonymous, does not contain any sensitive information, and address potential biases if the synthetic dataset is trained to a model. 
+
+```{r, gen-ai-2, warning=FALSE}
+# Select sample data with only 'question' and 'answer' columns
+set.seed(123)
+df_notes_sample <- df_notes %>%
+  filter(answer_length > 4000 | question_length > 4000) %>%
+  dplyr::select(question, answer) %>% 
+  sample_n(3, replace = TRUE, seed = 123) # Sample 3 rows
+
+# Apply the function to each question and answer in sample data
+df_notes_sample$generated_conversation_id <- mapply(
+  generate_conversation,
+  df_notes_sample$question,
+  df_notes_sample$answer,
+  'indonesian'
+)
+
+df_notes_sample$generated_conversation_en <- mapply(
+  generate_conversation,
+  df_notes_sample$question,
+  df_notes_sample$answer, 
+  'english'
+)
+
+# View the data frame with generated conversations
+datatable(head(df_notes_sample, 1), caption = "Generated Conversations")
+```
+
+
+As a sample, we gathered three rows of data with long questions and answers. The function `generate_conversation` is then applied to each question and answer in the sample data to generate synthetic conversations in Indonesian and English. The generated conversations are stored in the `generated_conversation_id` and `generated_conversation_en` columns, respectively. The generated conversations are then displayed in the table above.
+
+Overall, we have synthetic conversations in Indonesian and English with names and other personally identifiable information are removed to ensure anonymity. These synthetic conversations has the potential to be used as a question answering dataset in Indonesian language, which can be used to train the LLM model to be relevant to the Indonesian context. This will help improve the quality of the telemedicine platform by providing relevant and accurate responses to patient questions.
+
+# Discussion
+
+Upon analyzing the content of the telemedicine consultations, we identified three key hypotheses that could improve the efficiency and effectiveness of the telemedicine platform. The hypotheses are related to simplifying pregnancy-related answers, triage prioritization for HIV-related questions, and generating synthetic conversations to train the LLM model.
+
+The first hypothesis on simplifying pregnancy-related answers was successfully addressed by segmenting the pregnancy-related consultations into three distinct clusters. The clusters were named based on the main themes of the conversations, such as "Pregnancy Progression and Maternal Health," "Early Pregnancy Signs and Hormonal Concerns," and "Fertility, Conception, and Sexual Health." The t-SNE visualization showed that the clusters were well-separated, indicating that the segmentation was successful. This will help streamline information and improve support for expectant mothers by categorizing diverse pregnancy-related queries into general categories. The drawback of this analysis is that the clustering is done based on the answers given by the physician, which might not be the best representation of the patient's question. Future work could involve clustering based on both question and answer to get a better representation of the conversation.
+
+Second hypothesis on triage prioritization for HIV-related questions was successfully addressed by segmenting the HIV-related consultations into six distinct clusters. The clusters were named based on the main themes of the conversations, such as "Sexual Relationships and Protection," "Unprotected Sexual Activity Risks," "Testing and Diagnosis," "HIV/AIDS Awareness and Symptoms," "Potential Exposure to Viruses," and "Treatment and Recovery Support." The UMAP visualization showed that the clusters were well-separated, indicating that the segmentation was successful. The triage priorities were assigned to each cluster based on the urgency and severity of the themes identified. The distribution of triage priorities showed that the majority of consultations were classified as Medium priority, followed by High and Low priorities. For the predictive analysis, we created a model to predict the triage priorities of the HIV-related consultations, which demonstrated high accuracy, sensitivity, and specificity. This will help improve the efficiency of the telemedicine platform by ensuring that high-risk consultations are addressed promptly. The drawback of this method might related to how we conclude the triage priority, as it is based on the most frequent keywords of the clustering analysis which might not be the best representation of the urgency of the question. Future work could involve more in-depth analysis of the question to determine the urgency of the question.
+
+Last hypothesis on generating synthetic conversations was successfully addressed by creating synthetic conversations in Indonesian and English using OpenAI's GPT-4o-mini API. The synthetic conversations were generated based on patient questions and physician answers from the dataset. The generated conversations were stored in the `generated_conversation_id` and `generated_conversation_en` columns, respectively. These synthetic conversations can be used as a question answering dataset in Indonesian language, which can be used to train the LLM model to be relevant to the Indonesian context. This will help create contextual LLM model for telemedicine platform that can provide relevant and accurate responses to patient questions. The drawback of this method is that the synthetic conversation might not be as accurate as the real conversation, as it is generated based on the question and answer from the dataset, which has limited context and information. Future work could involve more comprehensive data preprocessing and prompt engineering to improve the quality of the synthetic conversations.
+
+# Conclusion
+
+In conclusion, the hypotheses on simplifying pregnancy-related answers, triage prioritization for HIV-related questions, and generating synthetic conversations were successfully addressed through data analysis, machine learning techniques, and text generation using lLM. The segmentation of pregnancy-related consultations and HIV-related consultations into distinct clusters will help streamline information and improve support for expectant mothers and HIV patients. The predictive model for triage prioritization of HIV-related consultations will help ensure that high-risk consultations are addressed promptly. The synthetic conversations generated in Indonesian and English will help create a contextual LLM model for the telemedicine platform. These findings will help improve the efficiency and effectiveness of the telemedicine platform by providing relevant and accurate data classification and prediction. Future work could involve more in-depth analysis of the questions and answers to improve the clustering and predictive models, as well as more comprehensive data preprocessing and prompt engineering to improve the quality of the synthetic conversations.
+
+# References
+
+1. Juanita, Safitri; Purwitasari, Diana; Purnama, I Ketut Eddy; Purnomo, Mauridhi (2023), “Doctor's Answer Text Dataset in Indonesian Contains Information on Medical Interview Patterns”, Mendeley Data, V1, doi: 10.17632/p8d5bynh3m.1
+2. S. Juanita, D. Purwitasari, I. Ketut Eddy Purnama, A. Famasya Abdillah and M. H. Purnomo, "Topic Modeling for Online Health Consultation on Low-Risk Diseases," 2024 International Seminar on Intelligent Technology and Its Applications (ISITIA), Mataram, Indonesia, 2024, pp. 196-201, doi: 10.1109/ISITIA63062.2024.10667722.
+3. Wang, Junda & Yao, Zonghai & Yang, Zhichao & Zhou, Huixue & Li, Rumeng & Wang, Xun & Xu, Yucheng & Yu, Hong. (2024). NoteChat: A Dataset of Synthetic Patient-Physician Conversations Conditioned on Clinical Notes. 15183-15201. 10.18653/v1/2024.findings-acl.901. 
+4. OpenAI API Documentation. https://platform.openai.com/docs/overview
